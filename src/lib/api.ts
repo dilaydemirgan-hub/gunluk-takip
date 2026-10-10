@@ -77,6 +77,16 @@ export function gunKaydet(
   })
 }
 
+/** Tek görevin işaretini anında yazar; günü "gönderildi" saymaz. */
+export function isaretKaydet(kod: string, tarih: string, gorevId: string, yapildi: boolean) {
+  return cagir<{ gorev_id: string; yapildi: boolean }>('isaret_kaydet', {
+    p_kod: kod,
+    p_tarih: tarih,
+    p_gorev_id: gorevId,
+    p_yapildi: yapildi,
+  })
+}
+
 export function gecmisGetir(kod: string) {
   return cagir<Gecmis>('gecmis_getir', { p_kod: kod })
 }

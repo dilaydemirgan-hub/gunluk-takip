@@ -7,11 +7,43 @@ import { Kaydirici } from '../bilesenler/Kaydirici'
 import { KesifArsivi } from '../bilesenler/KesifArsivi'
 import { SeriRozeti } from '../bilesenler/SeriRozeti'
 import { Gecersiz, Yukleniyor } from '../bilesenler/Durum'
-import { RpcHata, gecmisGetir, gunGetir, gunKaydet, hataMesaji } from '../lib/api'
+import { RpcHata, gecmisGetir, gunGetir, gunKaydet, hataMesaji, isaretKaydet } from '../lib/api'
 import { gorecelTarih, gunEkle, uzunTarih } from '../lib/tarih'
 import { TUR_ADI, TUR_SIRASI, type Gecmis, type GunOzeti, type GunVerisi } from '../lib/tipler'
 
 type Sekme = 'bugun' | 'gecmis' | 'kesif'
+
+/** Kaygı / kaçınma / not taslağı: "Günü kaydet"e basılmadan çıkılırsa
+ *  telefonda kalsın. Tarayıcı izin vermezse sessizce vazgeçer. */
+type Taslak = { kaygi: number; kacinma: number; notMetni: string }
+const taslakAnahtari = (kod: string, tarih: string) => `gt-taslak:${kod}:${tarih}`
+
+function taslakOku(kod: string, tarih: string): Taslak | null {
+  try {
+    const ham = localStorage.getItem(taslakAnahtari(kod, tarih))
+    return ham ? (JSON.parse(ham) as Taslak) : null
+  } catch {
+    return null
+  }
+}
+
+function taslakYaz(kod: string, tarih: string, t: Taslak) {
+  try {
+    localStorage.setItem(taslakAnahtari(kod, tarih), JSON.stringify(t))
+  } catch {
+    /* depolama yoksa taslak tutulmaz */
+  }
+}
+
+function taslakSil(kod: string, tarih: string) {
+  try {
+    localStorage.removeItem(taslakAnahtari(kod, tarih))
+  } catch {
+    /* yok say */
+  }
+}
+
+type GeriAl = { gorevId: string; onceki: boolean; baslik: string }
 
 const SEKMELER: { anahtar: Sekme; ad: string }[] = [
   { anahtar: 'bugun', ad: 'Bugün' },
@@ -40,14 +72,27 @@ export function DanisanEkrani() {
   const [kaydedildi, setKaydedildi] = useState(false)
   const zamanlayici = useRef<number | undefined>(undefined)
 
+  /** Son işaretlemenin geri alınabilir kaydı (5 sn görünür). */
+  const [geriAl, setGeriAl] = useState<GeriAl | null>(null)
+  const geriAlZamani = useRef<number | undefined>(undefined)
+  /** Her görev için son gönderilen isteğin numarası; eski hatalar yeni durumu bozmasın. */
+  const istekNo = useRef<Record<string, number>>({})
+  /** Kullanıcı kaydırıcı/notla oynadı mı — oynamadıysa taslak yazılmaz. */
+  const taslakKirli = useRef(false)
+
   /** gun_getir dönüşünü forma yansıt. */
-  const doldur = useCallback((g: GunVerisi) => {
-    setVeri(g)
-    setIsaretler(Object.fromEntries(g.gorevler.map((x) => [x.id, x.yapildi])))
-    setKaygi(g.gun.kaygi ?? 5)
-    setKacinma(g.gun.kacinma ?? 5)
-    setNotMetni(g.gun.not_metni ?? '')
-  }, [])
+  const doldur = useCallback(
+    (g: GunVerisi) => {
+      setVeri(g)
+      setIsaretler(Object.fromEntries(g.gorevler.map((x) => [x.id, x.yapildi])))
+      const t = taslakOku(kod, g.tarih)
+      setKaygi(t?.kaygi ?? g.gun.kaygi ?? 5)
+      setKacinma(t?.kacinma ?? g.gun.kacinma ?? 5)
+      setNotMetni(t?.notMetni ?? g.gun.not_metni ?? '')
+      taslakKirli.current = false
+    },
+    [kod],
+  )
 
   useEffect(() => {
     let gecerli = true
@@ -70,7 +115,63 @@ export function DanisanEkrani() {
     }
   }, [kod, tarih, doldur])
 
-  useEffect(() => () => clearTimeout(zamanlayici.current), [])
+  useEffect(
+    () => () => {
+      clearTimeout(zamanlayici.current)
+      clearTimeout(geriAlZamani.current)
+    },
+    [],
+  )
+
+  // Kaydırıcı / not değişince taslağı telefonda tut.
+  useEffect(() => {
+    if (!veri || !taslakKirli.current) return
+    taslakYaz(kod, veri.tarih, { kaygi, kacinma, notMetni })
+  }, [kod, veri, kaygi, kacinma, notMetni])
+
+  function taslakDegisti<T>(set: (v: T) => void) {
+    return (v: T) => {
+      taslakKirli.current = true
+      set(v)
+    }
+  }
+
+  /** Tike basınca: ekranda hemen değiştir, sunucuya hemen yaz. */
+  async function isaretle(gorevId: string, yeni: boolean, geriAlinabilir = true) {
+    if (!veri) return
+    const tarih = veri.tarih
+    const onceki = isaretler[gorevId] ?? false
+    const no = (istekNo.current[gorevId] ?? 0) + 1
+    istekNo.current[gorevId] = no
+
+    setIsaretler((o) => ({ ...o, [gorevId]: yeni }))
+    setHata(null)
+
+    clearTimeout(geriAlZamani.current)
+    if (geriAlinabilir) {
+      const baslik = veri.gorevler.find((g) => g.id === gorevId)?.baslik ?? ''
+      setGeriAl({ gorevId, onceki, baslik })
+      geriAlZamani.current = window.setTimeout(() => setGeriAl(null), 5000)
+    } else {
+      setGeriAl(null)
+    }
+
+    try {
+      await isaretKaydet(kod, tarih, gorevId, yeni)
+      gecmisGetir(kod).then(setGecmis).catch(() => {})
+    } catch (e) {
+      // Bu görev için daha yeni bir istek varsa ona dokunma.
+      if (istekNo.current[gorevId] !== no) return
+      setIsaretler((o) => ({ ...o, [gorevId]: onceki }))
+      setGeriAl(null)
+      setHata(`İşaret kaydedilemedi. ${hataMesaji(e)}`)
+    }
+  }
+
+  function geriAlUygula() {
+    if (!geriAl) return
+    isaretle(geriAl.gorevId, geriAl.onceki, false)
+  }
 
   const gruplar = useMemo(() => {
     if (!veri) return []
@@ -103,6 +204,7 @@ export function DanisanEkrani() {
         kacinma,
         notMetni.trim() || null,
       )
+      taslakSil(kod, veri.tarih)
       doldur(yeni)
       setGecmis(await gecmisGetir(kod))
 
@@ -189,7 +291,7 @@ export function DanisanEkrani() {
                           gorev={g}
                           kilitli={kilitli}
                           yapildi={isaretler[g.id] ?? false}
-                          degistir={(y) => setIsaretler((o) => ({ ...o, [g.id]: y }))}
+                          degistir={(y) => isaretle(g.id, y)}
                         />
                       ))}
                     </div>
@@ -197,11 +299,16 @@ export function DanisanEkrani() {
                 ))}
               </div>
             )}
+            {gruplar.length > 0 && !kilitli && (
+              <p className="mt-4 text-center text-[0.72rem] text-silik">
+                İşaretler anında kaydedilir.
+              </p>
+            )}
           </div>
 
           <div className="cam space-y-4 rounded-yumusak p-5">
-            <Kaydirici etiket="Kaygı" deger={kaygi} kilitli={kilitli} degistir={setKaygi} />
-            <Kaydirici etiket="Kaçınma" deger={kacinma} kilitli={kilitli} degistir={setKacinma} />
+            <Kaydirici etiket="Kaygı" deger={kaygi} kilitli={kilitli} degistir={taslakDegisti(setKaygi)} />
+            <Kaydirici etiket="Kaçınma" deger={kacinma} kilitli={kilitli} degistir={taslakDegisti(setKacinma)} />
           </div>
 
           <div className="cam rounded-yumusak p-5">
@@ -214,7 +321,7 @@ export function DanisanEkrani() {
               value={notMetni}
               disabled={kilitli}
               maxLength={280}
-              onChange={(e) => setNotMetni(e.target.value)}
+              onChange={(e) => taslakDegisti(setNotMetni)(e.target.value)}
               placeholder="Tek satır yeter."
               className="mt-2.5 w-full rounded-satir border border-cizgi bg-gece/50 px-4 py-3.5 text-[0.975rem] text-metin transition-colors placeholder:text-silik focus:border-vurgu focus:bg-gece/70 focus:outline-none disabled:opacity-50"
             />
@@ -273,7 +380,24 @@ export function DanisanEkrani() {
         </div>
       )}
 
-      {kaydedildi && (
+      {geriAl && sekme === 'bugun' && (
+        <div className="fixed inset-x-0 bottom-24 z-40 flex justify-center px-4">
+          <div className="animate-yukari flex max-w-md items-center gap-3 rounded-full border border-vurgu/30 bg-yuzey-ust py-1.5 pr-1.5 pl-4 text-sm shadow-yuzen">
+            <span className="truncate text-soluk">
+              {geriAl.onceki ? 'İşaret kaldırıldı' : 'İşaretlendi, kaydedildi'}
+            </span>
+            <button
+              type="button"
+              onClick={geriAlUygula}
+              className="shrink-0 cursor-pointer rounded-full bg-vurgu/12 px-3 py-1.5 font-medium text-vurgu ring-1 ring-vurgu/25 ring-inset"
+            >
+              Geri al
+            </button>
+          </div>
+        </div>
+      )}
+
+      {kaydedildi && !geriAl && (
         <div className="pointer-events-none fixed inset-x-0 bottom-24 z-40 flex justify-center">
           <span className="animate-yukari rounded-full border border-vurgu/30 bg-yuzey-ust px-4 py-2 text-sm font-medium text-vurgu shadow-yuzen">
             Kaydedildi

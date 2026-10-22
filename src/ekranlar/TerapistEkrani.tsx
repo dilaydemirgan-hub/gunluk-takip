@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { Gecersiz, Yukleniyor } from '../bilesenler/Durum'
 import { GorevDuzenleyici } from '../bilesenler/GorevDuzenleyici'
+import { GunDetayi } from '../bilesenler/GunDetayi'
 import { KopyaIkon } from '../bilesenler/ikonlar'
 import { RpcHata, hataMesaji, yOzet } from '../lib/api'
 import { gorecelTarih, saat, uzunTarih } from '../lib/tarih'
@@ -14,6 +15,7 @@ export function TerapistEkrani() {
   const [gecersiz, setGecersiz] = useState(false)
   const [hata, setHata] = useState<string | null>(null)
   const [secili, setSecili] = useState<string | null>(null)
+  const [detay, setDetay] = useState<GunOzeti | null>(null)
   const [gunSecici, setGunSecici] = useState('')
   const [kopyalandi, setKopyalandi] = useState(false)
 
@@ -126,11 +128,14 @@ export function TerapistEkrani() {
                 gun={gun}
                 bugun={ozet.bugun}
                 duzenle={() => setSecili(gun.tarih)}
+                ac={() => setDetay(gun)}
               />
             ))}
           </tbody>
         </table>
       </div>
+
+      {detay && <GunDetayi gun={detay} bugun={ozet.bugun} kapat={() => setDetay(null)} />}
 
       {secili && (
         <GorevDuzenleyici
@@ -151,10 +156,12 @@ function Satir({
   gun,
   bugun,
   duzenle,
+  ac,
 }: {
   gun: GunOzeti
   bugun: string
   duzenle: () => void
+  ac: () => void
 }) {
   // Boş gün burada net görünsün — danışan tarafının aksine.
   const bos = gun.toplam === 0 && !gun.gonderildi_at
@@ -176,7 +183,12 @@ function Satir({
         {gun.toplam === 0 ? (
           <span className="text-silik">—</span>
         ) : (
-          <span className="tabular-nums">
+          <button
+            type="button"
+            onClick={ac}
+            title="Hangi görevleri yaptığını gör"
+            className="cursor-pointer tabular-nums underline decoration-cizgi-parlak underline-offset-4 hover:decoration-vurgu"
+          >
             <span
               className={`font-semibold ${
                 gun.tamamlanan === gun.toplam ? 'text-vurgu' : 'text-metin'
@@ -185,7 +197,7 @@ function Satir({
               {gun.tamamlanan}
             </span>
             <span className="text-silik">/{gun.toplam}</span>
-          </span>
+          </button>
         )}
       </td>
 
@@ -215,7 +227,16 @@ function Satir({
         )}
       </td>
 
-      <td className="px-4 py-3 text-right whitespace-nowrap">
+      <td className="space-x-1.5 px-4 py-3 text-right whitespace-nowrap">
+        {gun.toplam > 0 && (
+          <button
+            type="button"
+            onClick={ac}
+            className="cursor-pointer rounded-lg border border-vurgu/30 bg-vurgu/10 px-3 py-1.5 text-xs font-medium text-vurgu transition-colors hover:bg-vurgu/20"
+          >
+            Ne yaptı?
+          </button>
+        )}
         <button
           type="button"
           onClick={duzenle}
